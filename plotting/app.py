@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import List, Optional
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 import matplotlib
 matplotlib.use("QtAgg")
@@ -11,11 +11,24 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib import font_manager
 
-from .spec import PlotSpec, PlotType, StyleSpec, SeriesSpec, SeriesInlineData, SeriesStyleSpec
+from .spec import PlotSpec, PlotFamily, PlotType, StyleSpec, SeriesSpec, SeriesInlineData, SeriesStyleSpec
 from .builder import build_series_data, draw
 from .export_code import export_code_scaffold
-from .plot_types import meta_for
-from . import export_dialogs as ExportDialog
+from .plot_types import (
+    meta_for,
+    types_for_family,
+    default_type_for_family,
+    label_for_family,
+    available_families,
+    family_is_available,
+)
+
+import weakref
+
+try:
+    import shiboken6
+except Exception:
+    shiboken6 = None
 
 class MatplotlibPreview(QtWidgets.QWidget):
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
@@ -33,10 +46,8 @@ class MatplotlibPreview(QtWidgets.QWidget):
         self._fig.clear()
 
         pt = spec.plot_type
-        if pt in (PlotType.LINE3D, PlotType.SCATTER3D):
-            self._ax = self._fig.add_subplot(111, projection="3d")
-        else:
-            self._ax = self._fig.add_subplot(111)
+        is_3d = bool(getattr(meta_for(pt), "requires_z", False))
+        self._ax = self._fig.add_subplot(111, projection="3d" if is_3d else None)
 
         result = build_series_data(spec)
         draw(self._ax, spec, result.series)
@@ -52,7 +63,7 @@ class MatplotlibPreview(QtWidgets.QWidget):
                 axis = iss.axis or ""
                 messages.append(f"Series {s} {axis}: {iss.message}".strip())
         return messages
-
+    
     def save_figure(self, path: str, dpi: int = 300) -> None:
         self._fig.savefig(path, dpi=dpi, bbox_inches="tight")
 
@@ -79,6 +90,11 @@ class SeriesEditor(QtWidgets.QGroupBox):
         ("Dash-dot", "dashdot"),
     ]
 
+    _PH_X = "x values, e.g.\n0, 1, 2, 3\nor\n0 1 2 3"
+    _PH_Y = "y values, e.g.\n0.1, 0.4, 0.2, 0.9"
+    _PH_VALUES = "values, e.g.\n0.1, 0.4, 0.2, 0.9"
+    _PH_Z = "z values, e.g.\n0.2, 0.7, 1.1, 1.4"
+
     def __init__(self, index: int, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
         self._index = index
@@ -90,19 +106,11 @@ class SeriesEditor(QtWidgets.QGroupBox):
         # Data boxes
         self.x_edit = QtWidgets.QPlainTextEdit()
         self.y_edit = QtWidgets.QPlainTextEdit()
-        self.x_edit.setPlaceholderText("x values, e.g.\n0, 1, 2, 3\nor\n0 1 2 3")
-        self.y_edit.setPlaceholderText("y values, e.g.\n0.1, 0.4, 0.2, 0.9")
+        self.z_edit = QtWidgets.QPlainTextEdit()
 
-        # Std controls (per series)
-        self.x_std_check = QtWidgets.QCheckBox("Use x std")
-        self.y_std_check = QtWidgets.QCheckBox("Use y std")
-
-        self.x_std_edit = QtWidgets.QPlainTextEdit()
-        self.y_std_edit = QtWidgets.QPlainTextEdit()
-        self.x_std_edit.setPlaceholderText("x std (same length as x)")
-        self.y_std_edit.setPlaceholderText("y std (same length as y)")
-        self.x_std_edit.setEnabled(False)
-        self.y_std_edit.setEnabled(False)
+        self.x_edit.setPlaceholderText(self._PH_X)
+        self.y_edit.setPlaceholderText(self._PH_Y)
+        self.z_edit.setPlaceholderText(self._PH_Z)
 
         # Styling controls (per series)
         self.color_edit = QtWidgets.QLineEdit()
@@ -129,50 +137,41 @@ class SeriesEditor(QtWidgets.QGroupBox):
         for text, code in self.LINESTYLES:
             self.line_style.addItem(text, code)
 
+        self.outliers_check = QtWidgets.QCheckBox("Highlight outliers (±kσ)")
+        self.outliers_check.setChecked(False)
+
+        self.outliers_check.toggled.connect(lambda *_: self.changed.emit())
+
         # Layout
         form = QtWidgets.QFormLayout()
         form.addRow("Label", self.label_edit)
-
-        self.x_label = QtWidgets.QLabel("x")
-        self.y_label = QtWidgets.QLabel("y")
-        form.addRow(self.x_label, self.x_edit)
-        form.addRow(self.y_label, self.y_edit)
-        self.z_edit = QtWidgets.QPlainTextEdit()
-        self.z_edit.setPlaceholderText("z values, e.g.\n0, 1, 2, 3")
-        self.z_label = QtWidgets.QLabel("z")
-
-        # Std rows
-        form.addRow(self.x_std_check, self.x_std_edit)
-        form.addRow(self.y_std_check, self.y_std_edit)
-
-
 
         color_row = QtWidgets.QHBoxLayout()
         color_row.setContentsMargins(0, 0, 0, 0)
         color_row.addWidget(self.color_edit, 1)
         color_row.addWidget(self.color_btn)
-
         color_row_widget = QtWidgets.QWidget()
         color_row_widget.setLayout(color_row)
+        form.addRow("Colour", color_row_widget)
 
-        self.color_label = QtWidgets.QLabel("Colour")
-        form.addRow(self.color_label, color_row_widget)
+        self.x_label = QtWidgets.QLabel("x")
+        self.y_label = QtWidgets.QLabel("y")
+        self.z_label = QtWidgets.QLabel("z")
 
-        # Keep a reference so we can hide/show the whole row cleanly if needed
-        self.color_row_widget = color_row_widget
+        form.addRow(self.x_label, self.x_edit)
+        form.addRow(self.y_label, self.y_edit)
+        form.addRow(self.z_label, self.z_edit)
 
         self.marker_label = QtWidgets.QLabel("Marker")
         self.marker_size_label = QtWidgets.QLabel("Marker size")
         self.line_width_label = QtWidgets.QLabel("Line width")
         self.line_style_label = QtWidgets.QLabel("Line style")
 
-        form.addRow(self.z_label, self.z_edit)
-        self.z_edit.textChanged.connect(lambda *_: self.changed.emit())
-
         form.addRow(self.marker_label, self.marker_combo)
         form.addRow(self.marker_size_label, self.marker_size)
         form.addRow(self.line_width_label, self.line_width)
         form.addRow(self.line_style_label, self.line_style)
+        form.addRow("", self.outliers_check)
 
         self.setLayout(form)
 
@@ -180,11 +179,7 @@ class SeriesEditor(QtWidgets.QGroupBox):
         self.label_edit.textChanged.connect(lambda *_: self.changed.emit())
         self.x_edit.textChanged.connect(lambda *_: self.changed.emit())
         self.y_edit.textChanged.connect(lambda *_: self.changed.emit())
-
-        self.x_std_check.toggled.connect(self._on_x_std_toggled)
-        self.y_std_check.toggled.connect(self._on_y_std_toggled)
-        self.x_std_edit.textChanged.connect(lambda *_: self.changed.emit())
-        self.y_std_edit.textChanged.connect(lambda *_: self.changed.emit())
+        self.z_edit.textChanged.connect(lambda *_: self.changed.emit())
 
         self.color_edit.textChanged.connect(lambda *_: self.changed.emit())
         self.marker_combo.currentIndexChanged.connect(lambda *_: self.changed.emit())
@@ -194,31 +189,21 @@ class SeriesEditor(QtWidgets.QGroupBox):
 
         self.color_btn.clicked.connect(self._pick_colour)
 
+        # Default: hide z until a 3D plot type enables it
+        self.z_label.setVisible(False)
+        self.z_edit.setVisible(False)
+
     def _pick_colour(self) -> None:
         col = QtWidgets.QColorDialog.getColor(parent=self)
         if not col.isValid():
             return
         self.color_edit.setText(col.name())  # #RRGGBB
 
-    def _on_x_std_toggled(self, checked: bool) -> None:
-        self.x_std_edit.setEnabled(bool(checked) and self.x_std_edit.isVisible() and self.x_std_check.isEnabled())
-        self.changed.emit()
-
-    def _on_y_std_toggled(self, checked: bool) -> None:
-        self.y_std_edit.setEnabled(bool(checked) and self.y_std_edit.isVisible() and self.y_std_check.isEnabled())
-        self.changed.emit()
-
     def set_data_enabled(self, enabled: bool) -> None:
         # Keep styling editable even if the user has no data so the dummy preview remains designable.
         self.x_edit.setEnabled(enabled)
         self.y_edit.setEnabled(enabled)
-        self.z_edit.setEnabled(enabled and self.z_edit.isVisible())
-
-        self.x_std_check.setEnabled(enabled and self.x_std_check.isVisible())
-        self.y_std_check.setEnabled(enabled and self.y_std_check.isVisible())
-
-        self.x_std_edit.setEnabled(enabled and self.x_std_check.isChecked() and self.x_std_edit.isVisible())
-        self.y_std_edit.setEnabled(enabled and self.y_std_check.isChecked() and self.y_std_edit.isVisible())
+        self.z_edit.setEnabled(enabled)
 
     def flash(self, duration_ms: int = 650) -> None:
         original = self.styleSheet()
@@ -229,14 +214,10 @@ class SeriesEditor(QtWidgets.QGroupBox):
         label = self.label_edit.text().strip() or f"Series {self._index + 1}"
         return SeriesSpec(
             label=label,
-            use_x_std=bool(self.x_std_check.isChecked()),
-            use_y_std=bool(self.y_std_check.isChecked()),
             inline=SeriesInlineData(
                 x_text=self.x_edit.toPlainText(),
                 y_text=self.y_edit.toPlainText(),
                 z_text=self.z_edit.toPlainText(),
-                x_std_text=self.x_std_edit.toPlainText(),
-                y_std_text=self.y_std_edit.toPlainText(),
             ),
             style=SeriesStyleSpec(
                 color=self.color_edit.text().strip(),
@@ -244,6 +225,7 @@ class SeriesEditor(QtWidgets.QGroupBox):
                 marker_size=float(self.marker_size.value()),
                 line_width=float(self.line_width.value()),
                 line_style=str(self.line_style.currentData()),
+                highlight_outliers=self.outliers_check.isChecked(),
             ),
         )
 
@@ -252,11 +234,6 @@ class SeriesEditor(QtWidgets.QGroupBox):
         self.x_edit.setPlainText(spec.inline.x_text)
         self.y_edit.setPlainText(spec.inline.y_text)
         self.z_edit.setPlainText(getattr(spec.inline, "z_text", ""))
-
-        self.x_std_edit.setPlainText(getattr(spec.inline, "x_std_text", ""))
-        self.y_std_edit.setPlainText(getattr(spec.inline, "y_std_text", ""))
-        self.x_std_check.setChecked(bool(getattr(spec, "use_x_std", False)))
-        self.y_std_check.setChecked(bool(getattr(spec, "use_y_std", False)))
 
         self.color_edit.setText(spec.style.color)
 
@@ -270,45 +247,27 @@ class SeriesEditor(QtWidgets.QGroupBox):
         ls_code = spec.style.line_style
         idx = self.line_style.findData(ls_code)
         self.line_style.setCurrentIndex(idx if idx >= 0 else 0)
+        self.outliers_check.setChecked(bool(getattr(spec.style, "highlight_outliers", False)))
 
     def apply_plot_type(self, plot_type: PlotType) -> None:
         m = meta_for(plot_type)
 
-        # Input visibility
-        self.x_label.setVisible(m.requires_x)
-        self.x_edit.setVisible(m.requires_x)
+        show_x = bool(getattr(m, "requires_x", True))
+        show_z = bool(getattr(m, "requires_z", False))
+        values_only = bool(getattr(m, "y_is_values_only", False)) or not show_x
 
-        # NEW: z input visibility (3D)
-        requires_z = bool(getattr(m, "requires_z", False))
-        self.z_label.setVisible(requires_z)
-        self.z_edit.setVisible(requires_z)
+        # Visibility (never clear text; switching dims should preserve inputs)
+        self.x_label.setVisible(show_x)
+        self.x_edit.setVisible(show_x)
+        self.z_label.setVisible(show_z)
+        self.z_edit.setVisible(show_z)
 
-        # For y-only plots, tweak placeholder
-        if not m.requires_x:
-            self.y_edit.setPlaceholderText("values, e.g.\n0.1, 0.4, 0.2, 0.9")
-        else:
-            self.y_edit.setPlaceholderText("y values, e.g.\n0.1, 0.4, 0.2, 0.9")
+        # Labels + placeholders (single convention for 1D/2D/3D)
+        self.y_label.setText("values" if values_only else "y")
 
-        # Std visibility depends on plot type capability + whether x/y exists
-        show_x_std = bool(m.supports_x_std and m.requires_x)
-        show_y_std = bool(m.supports_y_std and m.requires_y)
-
-        self.x_std_check.setVisible(show_x_std)
-        self.x_std_edit.setVisible(show_x_std)
-        self.y_std_check.setVisible(show_y_std)
-        self.y_std_edit.setVisible(show_y_std)
-
-        if not show_x_std:
-            self.x_std_check.setChecked(False)
-            self.x_std_edit.setEnabled(False)
-        else:
-            self.x_std_edit.setEnabled(self.x_std_check.isChecked() and self.x_std_check.isEnabled())
-
-        if not show_y_std:
-            self.y_std_check.setChecked(False)
-            self.y_std_edit.setEnabled(False)
-        else:
-            self.y_std_edit.setEnabled(self.y_std_check.isChecked() and self.y_std_check.isEnabled())
+        self.x_edit.setPlaceholderText(self._PH_X if show_x else "")
+        self.y_edit.setPlaceholderText(self._PH_VALUES if values_only else self._PH_Y)
+        self.z_edit.setPlaceholderText(self._PH_Z if show_z else "")
 
         # Style control visibility
         self.marker_label.setVisible(m.supports_markers)
@@ -322,8 +281,6 @@ class SeriesEditor(QtWidgets.QGroupBox):
 
         self.line_style_label.setVisible(m.supports_lines)
         self.line_style.setVisible(m.supports_lines)
-
-
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
@@ -347,19 +304,16 @@ class MainWindow(QtWidgets.QMainWindow):
         controls.setLayout(controls_layout)
         controls_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Plot type
+        # --- NEW: Plot family + plot type ---
+        self.plot_family_combo = QtWidgets.QComboBox()
         self.plot_type_combo = QtWidgets.QComboBox()
-        self.plot_type_combo.addItem("Line", PlotType.LINE.value)
-        self.plot_type_combo.addItem("Scatter", PlotType.SCATTER.value)
-        self.plot_type_combo.addItem("Step", PlotType.STEP.value)
-        self.plot_type_combo.addItem("Area", PlotType.AREA.value)
-        self.plot_type_combo.addItem("Bar", PlotType.BAR.value)
-        self.plot_type_combo.addItem("Histogram", PlotType.HIST.value)
-        self.plot_type_combo.addItem("Box", PlotType.BOX.value)
-        self.plot_type_combo.addItem("Violin", PlotType.VIOLIN.value)
-        
-        self.plot_type_combo.addItem("Line 3D", PlotType.LINE3D.value)
-        self.plot_type_combo.addItem("Scatter 3D", PlotType.SCATTER3D.value)
+
+        # Only show families that currently have unique registered plot types.
+        for fam in available_families():
+            self.plot_family_combo.addItem(label_for_family(fam), fam.value)
+
+        # Populate types based on current family
+        self._rebuild_plot_type_combo(self._spec.plot_family)
 
         # Series count
         self.series_spin = QtWidgets.QSpinBox()
@@ -371,6 +325,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.have_data_check.setChecked(False)
 
         top_form = QtWidgets.QFormLayout()
+        top_form.addRow("Plot family", self.plot_family_combo)
         top_form.addRow("Plot type", self.plot_type_combo)
         top_form.addRow("Series", self.series_spin)
         top_form.addRow("", self.have_data_check)
@@ -380,7 +335,6 @@ class MainWindow(QtWidgets.QMainWindow):
         style_box = QtWidgets.QGroupBox("Style")
         style_form = QtWidgets.QFormLayout()
 
-        # Font applies to whole graph
         self.font_combo = QtWidgets.QComboBox()
         self.font_combo.setEditable(True)
         self.font_combo.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
@@ -409,6 +363,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.title_underline.setText("U")
         self.title_underline.setCheckable(True)
 
+        self.title_offset_edit = QtWidgets.QLineEdit()
+
         title_row = QtWidgets.QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.addWidget(self.title_edit, 1)
@@ -422,22 +378,56 @@ class MainWindow(QtWidgets.QMainWindow):
         self.xlab_edit = QtWidgets.QLineEdit()
         self.ylab_edit = QtWidgets.QLineEdit()
 
-        self.grid_check = QtWidgets.QCheckBox("Grid")
+        self.grid_check = QtWidgets.QCheckBox("Grid (major)")
         self.grid_check.setChecked(True)
+
+        self.minor_ticks_check = QtWidgets.QCheckBox("Minor ticks")
+        self.minor_ticks_check.setChecked(False)
+
+        self.minor_grid_check = QtWidgets.QCheckBox("Grid (minor)")
+        self.minor_grid_check.setChecked(False)
+        self.minor_grid_check.setEnabled(False)
+
+        def _minor_ticks_toggled(on: bool) -> None:
+            self.minor_grid_check.setEnabled(bool(on))
+            if not on:
+                self.minor_grid_check.setChecked(False)
+
+        self.minor_ticks_check.toggled.connect(_minor_ticks_toggled)
+
         self.legend_check = QtWidgets.QCheckBox("Legend")
         self.legend_check.setChecked(True)
 
-        self.font_spin = QtWidgets.QSpinBox()
-        self.font_spin.setRange(7, 24)
-        self.font_spin.setValue(11)
+        self.base_font_spin = QtWidgets.QSpinBox()
+        self.base_font_spin.setRange(7, 36)
+        self.base_font_spin.setValue(11)
+
+        self.title_font_spin = QtWidgets.QSpinBox()
+        self.title_font_spin.setRange(7, 48)
+        self.title_font_spin.setValue(13)
+
+        self.outlier_sigma_spin = QtWidgets.QDoubleSpinBox()
+        self.outlier_sigma_spin.setRange(0.1, 10.0)
+        self.outlier_sigma_spin.setDecimals(2)
+        self.outlier_sigma_spin.setSingleStep(0.25)
+        self.outlier_sigma_spin.setValue(3.0)
+
+        self.outlier_method_combo = QtWidgets.QComboBox()
+        self.outlier_method_combo.addItem("Mean ± k·Std (σ)", "std")
+        self.outlier_method_combo.addItem("Median ± k·MAD (robust)", "mad")
 
         style_form.addRow("Font", self.font_combo)
         style_form.addRow("Title", title_row_widget)
         style_form.addRow("x label", self.xlab_edit)
         style_form.addRow("y label", self.ylab_edit)
         style_form.addRow("", self.grid_check)
+        style_form.addRow("", self.minor_ticks_check)
+        style_form.addRow("", self.minor_grid_check)
         style_form.addRow("", self.legend_check)
-        style_form.addRow("Font size", self.font_spin)
+        style_form.addRow("Text font size", self.base_font_spin)
+        style_form.addRow("Title font size", self.title_font_spin)
+        style_form.addRow("Outlier k", self.outlier_sigma_spin)
+        style_form.addRow("Outlier method", self.outlier_method_combo)
 
         style_box.setLayout(style_form)
         controls_layout.addWidget(style_box)
@@ -483,39 +473,112 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.setStatusBar(QtWidgets.QStatusBar(self))
 
-        # Wire events
+        # --- Wire events ---
+        self.plot_family_combo.currentIndexChanged.connect(self._on_plot_family_changed)
         self.plot_type_combo.currentIndexChanged.connect(self._on_plot_type_changed)
+
         self.series_spin.valueChanged.connect(self._on_series_count_changed)
         self.have_data_check.toggled.connect(self._on_have_data_toggled)
 
         for w in [self.title_edit, self.xlab_edit, self.ylab_edit]:
             w.textChanged.connect(self._schedule_rebuild)
         self.grid_check.toggled.connect(self._schedule_rebuild)
+        self.minor_ticks_check.toggled.connect(self._schedule_rebuild)
+        self.minor_grid_check.toggled.connect(self._schedule_rebuild)
         self.legend_check.toggled.connect(self._schedule_rebuild)
-        self.font_spin.valueChanged.connect(self._schedule_rebuild)
+        self.base_font_spin.valueChanged.connect(self._schedule_rebuild)
+        self.title_font_spin.valueChanged.connect(self._schedule_rebuild)
 
         self.font_combo.currentTextChanged.connect(self._schedule_rebuild)
         self.title_bold.toggled.connect(self._schedule_rebuild)
         self.title_italic.toggled.connect(self._schedule_rebuild)
         self.title_underline.toggled.connect(self._schedule_rebuild)
 
+        self.outlier_sigma_spin.valueChanged.connect(self._schedule_rebuild)
+        self.outlier_method_combo.currentIndexChanged.connect(self._schedule_rebuild)
+
         self.export_fig_btn.clicked.connect(self._export_figure)
         self.export_code_btn.clicked.connect(self._export_code)
+
+        # Sync combos to current spec defaults
+        self._sync_family_type_ui_from_spec(self._spec)
 
         self._rebuild_series_editors()
         self._rebuild_preview()
 
-    def _schedule_rebuild(self,) -> None:
-        self._debounce_timer.start(120)
+    # ---- NEW helpers for 2 dropdowns ----
+
+    def _current_plot_family(self) -> PlotFamily:
+        return PlotFamily(self.plot_family_combo.currentData())
 
     def _current_plot_type(self) -> PlotType:
         return PlotType(self.plot_type_combo.currentData())
+
+    def _rebuild_plot_type_combo(self, family: PlotFamily) -> None:
+        self.plot_type_combo.blockSignals(True)
+        self.plot_type_combo.clear()
+
+        types = types_for_family(family)
+        for pt in types:
+            self.plot_type_combo.addItem(meta_for(pt).label, pt.value)
+
+        # If no types registered for this family, fall back to BASIC/LINE
+        if not types:
+            fallback = default_type_for_family(PlotFamily.BASIC)
+            self.plot_type_combo.addItem(meta_for(fallback).label, fallback.value)
+
+        self.plot_type_combo.blockSignals(False)
+
+    def _sync_family_type_ui_from_spec(self, spec: PlotSpec) -> None:
+        spec = spec.normalised()
+
+        # If spec refers to a family that isn't currently in the dropdown, fall back to BASIC.
+        fam_value = spec.plot_family.value
+        idx = self.plot_family_combo.findData(fam_value)
+        if idx < 0:
+            fam_value = PlotFamily.BASIC.value
+            idx = self.plot_family_combo.findData(fam_value)
+
+        self.plot_family_combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+        fam = PlotFamily(self.plot_family_combo.currentData())
+        self._rebuild_plot_type_combo(fam)
+
+        type_idx = self.plot_type_combo.findData(spec.plot_type.value)
+        if type_idx < 0:
+            # Fall back to family default
+            pt = default_type_for_family(fam)
+            type_idx = self.plot_type_combo.findData(pt.value)
+
+        self.plot_type_combo.setCurrentIndex(type_idx if type_idx >= 0 else 0)
+
+
+    def _on_plot_family_changed(self) -> None:
+        fam = self._current_plot_family()
+        self._rebuild_plot_type_combo(fam)
+
+        # Snap to the family's default type (first in registry)
+        pt = default_type_for_family(fam)
+        idx = self.plot_type_combo.findData(pt.value)
+        if idx >= 0:
+            self.plot_type_combo.setCurrentIndex(idx)
+
+        # Apply to series editors
+        pt_now = self._current_plot_type()
+        for ed in getattr(self, "_series_editors", []):
+            ed.apply_plot_type(pt_now)
+        self._schedule_rebuild()
 
     def _on_plot_type_changed(self) -> None:
         pt = self._current_plot_type()
         for ed in getattr(self, "_series_editors", []):
             ed.apply_plot_type(pt)
         self._schedule_rebuild()
+
+    # ---- Existing behaviour ----
+
+    def _schedule_rebuild(self, *_args) -> None:
+        self._debounce_timer.start(120)
 
     def _on_series_count_changed(self, value: int) -> None:
         prev_spec = self._collect_spec_from_ui()
@@ -573,31 +636,54 @@ class MainWindow(QtWidgets.QMainWindow):
             ed.set_data_enabled(enabled)
 
     def _collect_spec_from_ui(self) -> PlotSpec:
+        plot_family = PlotFamily(self.plot_family_combo.currentData())
         plot_type = PlotType(self.plot_type_combo.currentData())
         you_got_data = self.have_data_check.isChecked()
         series_count = int(self.series_spin.value())
 
         series_specs = [ed.to_series_spec() for ed in self._series_editors]
+
+        # ---- parse title offset from text box ----
+        raw_offset = self.title_offset_edit.text().strip()
+        if raw_offset == "":
+            title_offset = None
+        else:
+            try:
+                title_offset = float(raw_offset)
+            except ValueError:
+                raise ValueError("Title offset must be a number")
+
+        # ---- build style spec ----
         style = StyleSpec(
             font_family=self.font_combo.currentText().strip(),
+
             title=self.title_edit.text(),
             title_bold=self.title_bold.isChecked(),
             title_italic=self.title_italic.isChecked(),
             title_underline=self.title_underline.isChecked(),
+            title_offset=title_offset,
+
             x_label=self.xlab_edit.text(),
             y_label=self.ylab_edit.text(),
+
             show_grid=self.grid_check.isChecked(),
+            show_minor_ticks=self.minor_ticks_check.isChecked(),
+            show_minor_grid=self.minor_grid_check.isChecked(),
             show_legend=self.legend_check.isChecked(),
-            base_font_size=int(self.font_spin.value()),
+
+            base_font_size=int(self.base_font_spin.value()),
+            title_font_size=int(self.title_font_spin.value()),
         )
 
         return PlotSpec(
+            plot_family=plot_family,
             plot_type=plot_type,
             you_got_data=you_got_data,
             series_count=series_count,
             series=series_specs,
             style=style,
-        ).normalised()
+        )
+
 
     def _rebuild_preview(self) -> None:
         self._spec = self._collect_spec_from_ui()
@@ -608,45 +694,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._spec = self._collect_spec_from_ui()
         self._rebuild_preview()
 
-        dlg = ExportDialog.ExportFigureDialog(self)
-        if dlg.exec() != QtWidgets.QDialog.Accepted:
-            return
-
-        fmt, dpi, jpg_q = dlg.values()
-
-        # pick a path based on chosen format
-        default_name = f"figure.{fmt}"
-        filt = {
-            "png": "PNG (*.png)",
-            "jpg": "JPG (*.jpg *.jpeg)",
-            "pdf": "PDF (*.pdf)",
-        }[fmt]
-
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export figure", default_name, filt)
+        filters = "PNG (*.png);PDF (*.pdf);SVG (*.svg)"
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export figure", "figure.png", filters)
         if not path:
             return
 
-        lower = path.lower()
-        if fmt == "png" and not lower.endswith(".png"):
-            path += ".png"
-        elif fmt == "jpg" and not (lower.endswith(".jpg") or lower.endswith(".jpeg")):
-            path += ".jpg"
-        elif fmt == "pdf" and not lower.endswith(".pdf"):
-            path += ".pdf"
+        dpi = 300
+        if path.lower().endswith(".png"):
+            dpi, ok = QtWidgets.QInputDialog.getInt(self, "PNG DPI", "DPI", 300, 72, 1200, 1)
+            if not ok:
+                return
 
-        # Save via Matplotlib; JPG quality is best-effort (depends on Matplotlib/Pillow)
-        if fmt in ("png", "jpg"):
-            if fmt == "jpg":
-                try:
-                    self.preview._fig.savefig(path, dpi=dpi, bbox_inches="tight", pil_kwargs={"quality": jpg_q})
-                except Exception:
-                    # fallback without pil_kwargs
-                    self.preview._fig.savefig(path, dpi=dpi, bbox_inches="tight")
-            else:
-                self.preview._fig.savefig(path, dpi=dpi, bbox_inches="tight")
-        else:
-            self.preview._fig.savefig(path, bbox_inches="tight")
-
+        self.preview.save_figure(path, dpi=int(dpi))
         self.statusBar().showMessage(f"Saved {path}", 1800)
 
     def _export_code(self) -> None:

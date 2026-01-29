@@ -13,7 +13,7 @@ class SeriesData:
     z: Optional[np.ndarray] = None
     x_std: Optional[np.ndarray] = None
     y_std: Optional[np.ndarray] = None
-
+    outlier_mask: Optional[np.ndarray] = None
 
 def make_sample_series(
     n_series: int,
