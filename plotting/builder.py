@@ -8,6 +8,7 @@ import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.ticker import AutoMinorLocator
 import matplotlib.colors as mcolors
+import matplotlib.dates as mdates
 
 from .spec import PlotSpec, PlotType, SeriesStyleSpec, SeriesInputMode
 from .parsing import (
@@ -17,6 +18,8 @@ from .parsing import (
     parse_table_with_header,
     table_to_columns,
     col_as_float,
+    parse_inline_datetime_vector,
+    col_as_datetime,
 )
 from .sample_data import SeriesData, make_sample_series
 from .plot_types import meta_for
@@ -95,6 +98,7 @@ def build_series_data(spec: PlotSpec) -> BuildResult:
     out_styles: List[SeriesStyleSpec] = []
 
     m = meta_for(spec.plot_type)
+    x_is_dt = bool(getattr(m, "x_is_datetime", False))
     sigma = float(getattr(spec.style, "outlier_sigma", 3.0))
     outlier_method = str(getattr(spec.style, "outlier_method", "std") or "std")
 
@@ -188,7 +192,13 @@ def build_series_data(spec: PlotSpec) -> BuildResult:
                 issues.append(ParseIssue(message=f"Missing z column '{s.inline.z_col}'.", series_index=idx, axis="table"))
                 continue
 
-            x, errx = col_as_float(x_col or [], s.inline.x_col) if m.requires_x else (np.asarray([], dtype=float), None)
+            if m.requires_x:
+                if x_is_dt:
+                    x, errx = col_as_datetime(x_col or [], s.inline.x_col)
+                else:
+                    x, errx = col_as_float(x_col or [], s.inline.x_col)
+            else:
+                x, errx = (np.asarray([], dtype=float), None)
             y, erry = col_as_float(y_col or [], s.inline.y_col)
             if errx:
                 issues.append(ParseIssue(message=errx, series_index=idx, axis="x"))
@@ -331,7 +341,10 @@ def build_series_data(spec: PlotSpec) -> BuildResult:
         z = None
 
         if m.requires_x:
-            x, err_x = parse_inline_vector(s.inline.x_text)
+            if x_is_dt:
+                x, err_x = parse_inline_datetime_vector(s.inline.x_text)
+            else:
+                x, err_x = parse_inline_vector(s.inline.x_text)
             if err_x:
                 issues.append(ParseIssue(message=err_x, series_index=idx, axis="x"))
 
@@ -579,6 +592,21 @@ def apply_style(ax, spec: PlotSpec, legend=None) -> None:
     ax.tick_params(labelsize=base)
     _apply_font_family_to_ticks(ax, font_family)
 
+    # ---- tick label rotation ----
+    xang = int(getattr(style, "x_tick_label_angle", 0) or 0)
+    yang = int(getattr(style, "y_tick_label_angle", 0) or 0)
+
+    if xang != 0:
+        for t in ax.get_xticklabels():
+            t.set_rotation(xang)
+            # common readability improvement when rotated
+            t.set_ha("right" if (abs(xang) % 180) not in (0,) else "center")
+
+    if yang != 0:
+        for t in ax.get_yticklabels():
+            t.set_rotation(yang)
+            t.set_va("center")
+
     # ---- minor ticks + grid ----
     is_3d = hasattr(ax, "zaxis")
 
@@ -608,6 +636,8 @@ def apply_style(ax, spec: PlotSpec, legend=None) -> None:
 def draw(ax, spec: PlotSpec, series: List[SeriesData], series_styles: Optional[List[SeriesStyleSpec]] = None) -> None:
     spec = spec.normalised()
     plot_type = spec.plot_type
+    m = meta_for(plot_type)
+    x_is_dt = bool(getattr(m, "x_is_datetime", False))
 
     # ---- helpers ----
     def _norm_marker(m: str) -> str:

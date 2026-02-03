@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import List, Optional
 
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 import matplotlib
 matplotlib.use("QtAgg")
@@ -20,10 +20,7 @@ from .plot_types import (
     default_type_for_family,
     label_for_family,
     available_families,
-    family_is_available,
 )
-
-import weakref
 
 try:
     import shiboken6
@@ -66,6 +63,20 @@ class MatplotlibPreview(QtWidgets.QWidget):
     
     def save_figure(self, path: str, dpi: int = 300) -> None:
         self._fig.savefig(path, dpi=dpi, bbox_inches="tight")
+
+    def apply_view(self, elev: float, azim: float, roll: float = 0.0) -> None:
+        # Only relevant if this is a 3D axes
+        if getattr(self._ax, "name", "") != "3d":
+            return
+
+        # Matplotlib supports elev/azim widely; roll is version-dependent.
+        try:
+            self._ax.view_init(elev=elev, azim=azim, roll=roll)
+        except TypeError:
+            # Older Matplotlib: no roll parameter
+            self._ax.view_init(elev=elev, azim=azim)
+
+        self._canvas.draw_idle()
 
 
 class SeriesEditor(QtWidgets.QGroupBox):
@@ -199,12 +210,6 @@ class SeriesEditor(QtWidgets.QGroupBox):
             return
         self.color_edit.setText(col.name())  # #RRGGBB
 
-    def set_data_enabled(self, enabled: bool) -> None:
-        # Keep styling editable even if the user has no data so the dummy preview remains designable.
-        self.x_edit.setEnabled(enabled)
-        self.y_edit.setEnabled(enabled)
-        self.z_edit.setEnabled(enabled)
-
     def flash(self, duration_ms: int = 650) -> None:
         original = self.styleSheet()
         self.setStyleSheet("QGroupBox { border: 2px solid palette(highlight); }")
@@ -320,15 +325,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.series_spin.setRange(1, 10)
         self.series_spin.setValue(1)
 
-        # You got data
-        self.have_data_check = QtWidgets.QCheckBox("You got data?")
-        self.have_data_check.setChecked(False)
-
         top_form = QtWidgets.QFormLayout()
         top_form.addRow("Plot family", self.plot_family_combo)
         top_form.addRow("Plot type", self.plot_type_combo)
-        top_form.addRow("Series", self.series_spin)
-        top_form.addRow("", self.have_data_check)
         controls_layout.addLayout(top_form)
 
         # Style controls
@@ -416,6 +415,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.outlier_method_combo.addItem("Mean ± k·Std (σ)", "std")
         self.outlier_method_combo.addItem("Median ± k·MAD (robust)", "mad")
 
+
+        # Tick label angles
+        self.x_tick_angle_spin = QtWidgets.QSpinBox()
+        self.x_tick_angle_spin.setRange(-180, 180)
+        self.x_tick_angle_spin.setValue(0)
+
+        self.y_tick_angle_spin = QtWidgets.QSpinBox()
+        self.y_tick_angle_spin.setRange(-180, 180)
+        self.y_tick_angle_spin.setValue(0)
+
+        style_form.addRow("x tick label angle", self.x_tick_angle_spin)
+        style_form.addRow("y tick label angle", self.y_tick_angle_spin)
+
+        self.x_tick_angle_spin.valueChanged.connect(self._schedule_rebuild)
+        self.y_tick_angle_spin.valueChanged.connect(self._schedule_rebuild)
+
+
         style_form.addRow("Font", self.font_combo)
         style_form.addRow("Title", title_row_widget)
         style_form.addRow("x label", self.xlab_edit)
@@ -442,7 +458,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.series_scroll.setWidgetResizable(True)
         self.series_scroll.setWidget(self.series_container)
         self.series_scroll.setMinimumWidth(380)
-        controls_layout.addWidget(self.series_scroll, 1)
 
         # Export buttons
         btn_row = QtWidgets.QHBoxLayout()
@@ -450,26 +465,89 @@ class MainWindow(QtWidgets.QMainWindow):
         self.export_code_btn = QtWidgets.QPushButton("Export code")
         btn_row.addWidget(self.export_fig_btn)
         btn_row.addWidget(self.export_code_btn)
-        controls_layout.addLayout(btn_row)
 
-        # Issue panel
-        self.issues_box = QtWidgets.QGroupBox("Messages")
-        self.issues_text = QtWidgets.QPlainTextEdit()
-        self.issues_text.setReadOnly(True)
-        issues_layout = QtWidgets.QVBoxLayout()
-        issues_layout.addWidget(self.issues_text)
-        self.issues_box.setLayout(issues_layout)
-        controls_layout.addWidget(self.issues_box)
 
-        # Right: preview
+        # Centre: preview
         self.preview = MatplotlibPreview()
 
-        splitter = QtWidgets.QSplitter()
-        splitter.addWidget(controls)
-        splitter.addWidget(self.preview)
+        # Right: series + view panel
+        right = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout()
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right.setLayout(right_layout)
+
+        right_controls = QtWidgets.QGroupBox("Series and view")
+        right_controls_layout = QtWidgets.QFormLayout()
+        right_controls.setLayout(right_controls_layout)
+
+        right_controls_layout.addRow("Series", self.series_spin)
+
+        # 3D view controls
+        self.view_elev = QtWidgets.QDoubleSpinBox()
+        self.view_elev.setRange(-180.0, 180.0)
+        self.view_elev.setDecimals(1)
+        self.view_elev.setSingleStep(1.0)
+        self.view_elev.setValue(30.0)
+
+        self.view_azim = QtWidgets.QDoubleSpinBox()
+        self.view_azim.setRange(-180.0, 180.0)
+        self.view_azim.setDecimals(1)
+        self.view_azim.setSingleStep(1.0)
+        self.view_azim.setValue(-60.0)
+
+        self.view_roll = QtWidgets.QDoubleSpinBox()
+        self.view_roll.setRange(-180.0, 180.0)
+        self.view_roll.setDecimals(1)
+        self.view_roll.setSingleStep(1.0)
+        self.view_roll.setValue(0.0)
+
+        right_controls_layout.addRow("Elevation", self.view_elev)
+        right_controls_layout.addRow("Azimuth", self.view_azim)
+        right_controls_layout.addRow("Roll", self.view_roll)
+
+        def _apply_view_from_ui() -> None:
+            self.preview.apply_view(
+                float(self.view_elev.value()),
+                float(self.view_azim.value()),
+                float(self.view_roll.value()),
+            )
+
+        self.view_elev.valueChanged.connect(lambda *_: _apply_view_from_ui())
+        self.view_azim.valueChanged.connect(lambda *_: _apply_view_from_ui())
+        self.view_roll.valueChanged.connect(lambda *_: _apply_view_from_ui())
+
+        preset_row = QtWidgets.QHBoxLayout()
+        self.view_xy_btn = QtWidgets.QPushButton("XY")
+        self.view_xz_btn = QtWidgets.QPushButton("XZ")
+        self.view_yz_btn = QtWidgets.QPushButton("YZ")
+        self.view_reset_btn = QtWidgets.QPushButton("Reset")
+        preset_row.addWidget(self.view_xy_btn)
+        preset_row.addWidget(self.view_xz_btn)
+        preset_row.addWidget(self.view_yz_btn)
+        preset_row.addWidget(self.view_reset_btn)
+        preset_widget = QtWidgets.QWidget()
+        preset_widget.setLayout(preset_row)
+        right_controls_layout.addRow("Presets", preset_widget)
+
+        right_layout.addWidget(right_controls, 0)
+
+        # Move series editors scroll to the right
+        right_layout.addWidget(self.series_scroll, 1)
+
+        # Move export buttons to the right
+        right_layout.addLayout(btn_row)
+
+        # ---- Main 3-way splitter ----
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        splitter.addWidget(controls)      # left
+        splitter.addWidget(self.preview)  # centre
+        splitter.addWidget(right)         # right
+
         splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(2, 1)
         main_layout.addWidget(splitter)
+
 
         self.setStatusBar(QtWidgets.QStatusBar(self))
 
@@ -478,7 +556,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_type_combo.currentIndexChanged.connect(self._on_plot_type_changed)
 
         self.series_spin.valueChanged.connect(self._on_series_count_changed)
-        self.have_data_check.toggled.connect(self._on_have_data_toggled)
 
         for w in [self.title_edit, self.xlab_edit, self.ylab_edit]:
             w.textChanged.connect(self._schedule_rebuild)
@@ -497,11 +574,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.outlier_sigma_spin.valueChanged.connect(self._schedule_rebuild)
         self.outlier_method_combo.currentIndexChanged.connect(self._schedule_rebuild)
 
+        self.view_reset_btn.clicked.connect(self._reset_view)
+        self.view_xy_btn.clicked.connect(self._view_xy)
+        self.view_xz_btn.clicked.connect(self._view_xz)
+        self.view_yz_btn.clicked.connect(self._view_yz)
+
         self.export_fig_btn.clicked.connect(self._export_figure)
         self.export_code_btn.clicked.connect(self._export_code)
 
         # Sync combos to current spec defaults
-        self._sync_family_type_ui_from_spec(self._spec)
+        self._set_view_controls_visible_for_plot_type(self._current_plot_type())
 
         self._rebuild_series_editors()
         self._rebuild_preview()
@@ -557,23 +639,33 @@ class MainWindow(QtWidgets.QMainWindow):
         fam = self._current_plot_family()
         self._rebuild_plot_type_combo(fam)
 
-        # Snap to the family's default type (first in registry)
-        pt = default_type_for_family(fam)
-        idx = self.plot_type_combo.findData(pt.value)
+        # Snap to the family's default type
+        pt_default = default_type_for_family(fam)
+        idx = self.plot_type_combo.findData(pt_default.value)
         if idx >= 0:
             self.plot_type_combo.setCurrentIndex(idx)
 
-        # Apply to series editors
+        # Now read the actual current type and update UI
         pt_now = self._current_plot_type()
+        self._set_view_controls_visible_for_plot_type(pt_now)
+
+        # Apply to series editors
         for ed in getattr(self, "_series_editors", []):
             ed.apply_plot_type(pt_now)
+
         self._schedule_rebuild()
+
 
     def _on_plot_type_changed(self) -> None:
         pt = self._current_plot_type()
+
+        self._set_view_controls_visible_for_plot_type(pt)
+
         for ed in getattr(self, "_series_editors", []):
             ed.apply_plot_type(pt)
+
         self._schedule_rebuild()
+
 
     # ---- Existing behaviour ----
 
@@ -605,7 +697,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_have_data_toggled(self, checked: bool) -> None:
         self._spec = replace(self._spec, you_got_data=checked).normalised()
-        self._set_series_data_enabled(checked)
         self._schedule_rebuild()
 
     def _rebuild_series_editors(self) -> None:
@@ -629,16 +720,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._series_editors.append(ed)
 
         self.series_layout.addStretch(1)
-        self._set_series_data_enabled(spec.you_got_data)
 
-    def _set_series_data_enabled(self, enabled: bool) -> None:
-        for ed in getattr(self, "_series_editors", []):
-            ed.set_data_enabled(enabled)
 
     def _collect_spec_from_ui(self) -> PlotSpec:
         plot_family = PlotFamily(self.plot_family_combo.currentData())
         plot_type = PlotType(self.plot_type_combo.currentData())
-        you_got_data = self.have_data_check.isChecked()
         series_count = int(self.series_spin.value())
 
         series_specs = [ed.to_series_spec() for ed in self._series_editors]
@@ -653,7 +739,6 @@ class MainWindow(QtWidgets.QMainWindow):
             except ValueError:
                 raise ValueError("Title offset must be a number")
 
-        # ---- build style spec ----
         style = StyleSpec(
             font_family=self.font_combo.currentText().strip(),
 
@@ -666,6 +751,9 @@ class MainWindow(QtWidgets.QMainWindow):
             x_label=self.xlab_edit.text(),
             y_label=self.ylab_edit.text(),
 
+            x_tick_label_angle=int(self.x_tick_angle_spin.value()),
+            y_tick_label_angle=int(self.y_tick_angle_spin.value()),
+
             show_grid=self.grid_check.isChecked(),
             show_minor_ticks=self.minor_ticks_check.isChecked(),
             show_minor_grid=self.minor_grid_check.isChecked(),
@@ -673,12 +761,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
             base_font_size=int(self.base_font_spin.value()),
             title_font_size=int(self.title_font_spin.value()),
+
+            outlier_sigma=float(self.outlier_sigma_spin.value()),
+            outlier_method=str(self.outlier_method_combo.currentData() or "std"),
         )
 
         return PlotSpec(
             plot_family=plot_family,
             plot_type=plot_type,
-            you_got_data=you_got_data,
+            you_got_data=True,
             series_count=series_count,
             series=series_specs,
             style=style,
@@ -687,8 +778,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _rebuild_preview(self) -> None:
         self._spec = self._collect_spec_from_ui()
-        messages = self.preview.render(self._spec)
-        self.issues_text.setPlainText("No issues." if not messages else "\n".join(messages))
+
+        # draw plot
+        self.preview.render(self._spec)
+
+        # re-apply camera if 3D (render recreates axes)
+        self.preview.apply_view(
+            float(self.view_elev.value()),
+            float(self.view_azim.value()),
+            float(self.view_roll.value()),
+        )
+
 
     def _export_figure(self) -> None:
         self._spec = self._collect_spec_from_ui()
@@ -720,6 +820,44 @@ class MainWindow(QtWidgets.QMainWindow):
             "Export complete",
             f"Wrote:\n{export_path}\n\nRun:\npython run_plot.py --show\nor\npython run_plot.py --out figure.pdf",
         )
+
+    def _set_view(self, elev: float, azim: float, roll: float = 0.0) -> None:
+        self.view_elev.blockSignals(True)
+        self.view_azim.blockSignals(True)
+        self.view_roll.blockSignals(True)
+        self.view_elev.setValue(elev)
+        self.view_azim.setValue(azim)
+        self.view_roll.setValue(roll)
+        self.view_roll.blockSignals(False)
+        self.view_azim.blockSignals(False)
+        self.view_elev.blockSignals(False)
+
+        self.preview.apply_view(elev, azim, roll)
+
+    # Suggested defaults (tweak as you like)
+    def _reset_view(self) -> None:
+        self._set_view(30.0, -60.0, 0.0)
+
+    def _view_xy(self) -> None:
+        # looking down z axis
+        self._set_view(90.0, -90.0, 0.0)
+
+    def _view_xz(self) -> None:
+        # looking down y axis
+        self._set_view(0.0, -90.0, 0.0)
+
+    def _view_yz(self) -> None:
+        # looking down x axis
+        self._set_view(0.0, 0.0, 0.0)
+
+    def _set_view_controls_visible_for_plot_type(self, pt: PlotType) -> None:
+        is_3d = bool(getattr(meta_for(pt), "requires_z", False))
+        for w in [
+            self.view_elev, self.view_azim, self.view_roll,
+            self.view_reset_btn, self.view_xy_btn, self.view_xz_btn, self.view_yz_btn,
+        ]:
+            w.setVisible(is_3d)
+
 
 
 def main() -> None:

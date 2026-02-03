@@ -38,10 +38,11 @@ class PlotMeta:
     supports_log_x: bool = True
     supports_log_y: bool = True
 
-    # Builder expects these
     requires_xy: bool = True
     supports_x_std: bool = False
     supports_y_std: bool = False
+
+    x_is_datetime: bool = False
 
     # Feature controls shown in UI for this plot type
     controls: List[ControlDef] = ()
@@ -51,6 +52,7 @@ FAMILY_LABELS: Dict[PlotFamily, str] = {
     PlotFamily.DISTRIBUTION: "Distribution",
     PlotFamily.RELATIONSHIPS: "Relationships",
     PlotFamily.MULTIVARIATE: "Multivariate",
+    PlotFamily.TIMESERIES: "Time Series",
     PlotFamily.GEOSPATIAL: "Geospatial",
     PlotFamily.NETWORK: "Network",
     PlotFamily.SURVIVAL: "Survival",
@@ -70,6 +72,7 @@ PLOT_META: Dict[PlotType, PlotMeta] = {
         requires_y=True,
         requires_z=False,
         y_is_values_only=False,
+        x_is_datetime=False,
         supports_markers=True,
         supports_marker_size=True,
         supports_lines=True,
@@ -86,6 +89,7 @@ PLOT_META: Dict[PlotType, PlotMeta] = {
         requires_y=True,
         requires_z=False,
         y_is_values_only=False,
+        x_is_datetime=False,
         supports_markers=True,
         supports_marker_size=True,
         supports_lines=False,
@@ -102,6 +106,7 @@ PLOT_META: Dict[PlotType, PlotMeta] = {
         requires_y=True,
         requires_z=False,
         y_is_values_only=False,
+        x_is_datetime=False,
         supports_markers=True,
         supports_marker_size=True,
         supports_lines=True,
@@ -118,6 +123,7 @@ PLOT_META: Dict[PlotType, PlotMeta] = {
         requires_y=True,
         requires_z=False,
         y_is_values_only=False,
+        x_is_datetime=False,
         supports_markers=False,
         supports_marker_size=False,
         supports_lines=False,
@@ -134,6 +140,7 @@ PLOT_META: Dict[PlotType, PlotMeta] = {
         requires_y=True,
         requires_z=False,
         y_is_values_only=False,
+        x_is_datetime=False,
         supports_markers=False,
         supports_marker_size=False,
         supports_lines=False,
@@ -153,11 +160,12 @@ PLOT_META: Dict[PlotType, PlotMeta] = {
         requires_x=False,
         requires_y=True,
         y_is_values_only=True,
+        x_is_datetime=False,
         supports_markers=False,
         supports_marker_size=False,
         supports_lines=False,
         supports_grouping=True,
-        supports_log_x=False,  # x not used
+        supports_log_x=False,
         supports_log_y=True,
         supports_errorbars=False,
         requires_xy=False,
@@ -168,6 +176,7 @@ PLOT_META: Dict[PlotType, PlotMeta] = {
         requires_x=False,
         requires_y=True,
         y_is_values_only=True,
+        x_is_datetime=False,
         supports_markers=False,
         supports_marker_size=False,
         supports_lines=False,
@@ -183,6 +192,7 @@ PLOT_META: Dict[PlotType, PlotMeta] = {
         requires_x=False,
         requires_y=True,
         y_is_values_only=True,
+        x_is_datetime=False,
         supports_markers=False,
         supports_marker_size=False,
         supports_lines=False,
@@ -203,6 +213,7 @@ PLOT_META: Dict[PlotType, PlotMeta] = {
         requires_y=True,
         requires_z=True,
         y_is_values_only=False,
+        x_is_datetime=False,
         supports_markers=True,
         supports_marker_size=True,
         supports_lines=True,
@@ -219,6 +230,7 @@ PLOT_META: Dict[PlotType, PlotMeta] = {
         requires_y=True,
         requires_z=True,
         y_is_values_only=False,
+        x_is_datetime=False,
         supports_markers=True,
         supports_marker_size=True,
         supports_lines=False,
@@ -238,6 +250,7 @@ PLOT_META: Dict[PlotType, PlotMeta] = {
         requires_x=False,
         requires_y=True,
         y_is_values_only=True,
+        x_is_datetime=False,
         supports_markers=False,
         supports_marker_size=False,
         supports_lines=True,
@@ -255,6 +268,7 @@ PLOT_META: Dict[PlotType, PlotMeta] = {
         requires_x=False,
         requires_y=True,
         y_is_values_only=True,
+        x_is_datetime=False,
         supports_markers=False,
         supports_marker_size=False,
         supports_lines=True,
@@ -268,10 +282,11 @@ PLOT_META: Dict[PlotType, PlotMeta] = {
     ),
     PlotType.QQNORM: PlotMeta(
         family=PlotFamily.DISTRIBUTION,
-        label="Q–Q (Normal)",
+        label="Q-Q (Normal)",
         requires_x=False,
         requires_y=True,
         y_is_values_only=True,
+        x_is_datetime=False,
         supports_markers=True,
         supports_marker_size=True,
         supports_lines=False,
@@ -294,6 +309,7 @@ PLOT_META: Dict[PlotType, PlotMeta] = {
         requires_y=True,
         requires_z=False,
         y_is_values_only=False,
+        x_is_datetime=False,
         supports_markers=False,
         supports_marker_size=False,
         supports_lines=False,
@@ -312,6 +328,7 @@ PLOT_META: Dict[PlotType, PlotMeta] = {
         requires_y=True,
         requires_z=False,
         y_is_values_only=False,
+        x_is_datetime=False,
         supports_markers=False,
         supports_marker_size=False,
         supports_lines=False,
@@ -323,7 +340,23 @@ PLOT_META: Dict[PlotType, PlotMeta] = {
         supports_x_std=False,
         supports_y_std=False,
     ),
-
+    PlotType.TIMESERIES: PlotMeta(
+        family=PlotFamily.BASIC,
+        label="Time series",
+        requires_x=True,
+        requires_y=True,
+        requires_z=False,
+        y_is_values_only=False,
+        x_is_datetime=True,
+        supports_markers=True,
+        supports_marker_size=True,
+        supports_lines=True,
+        supports_grouping=True,
+        supports_errorbars=True,
+        supports_x_std=True,
+        supports_y_std=True,
+        requires_xy=True,
+    ),
 }
 
 

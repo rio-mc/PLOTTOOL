@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Dict
-
+from typing import List, Optional, Tuple, Dict, Iterable
+from datetime import datetime, date, time
+import matplotlib.dates as mdates
 import numpy as np
 import csv
 from io import StringIO
@@ -159,5 +160,102 @@ def col_as_float(col: List[str], col_name: str) -> Tuple[np.ndarray, Optional[st
 
     if not out:
         return np.asarray([], dtype=float), f"No numeric values found in column '{col_name}'."
+
+    return np.asarray(out, dtype=float), None
+
+
+_DT_SPLIT = re.compile(r"[,\t;\n\r]+|\s{2,}")  # commas, tabs, semicolons, newlines, or big whitespace
+
+def _tokenise_datetime_text(text: str) -> List[str]:
+    raw = (text or "").strip()
+    if not raw:
+        return []
+    # Keep single-space separated tokens intact when user pastes ISO dates
+    # We split primarily on commas/newlines/tabs/semicolons. If the user pastes "2025-01-01 2025-01-02"
+    # it will also work because of the secondary split on 2+ spaces.
+    parts = []
+    for chunk in _DT_SPLIT.split(raw):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        # If chunk still contains single-space separated items, split them too.
+        # This helps "2025-01-01 2025-01-02" but preserves "2025-01-01T12:30:00".
+        if " " in chunk and "T" not in chunk:
+            parts.extend([p for p in chunk.split() if p.strip()])
+        else:
+            parts.append(chunk)
+    return parts
+
+def _parse_one_datetime(tok: str) -> datetime:
+    """
+    Parse one datetime token. Supports:
+      - ISO date: 2025-01-31
+      - ISO datetime: 2025-01-31T13:45:00 or 2025-01-31 13:45:00
+      - date only -> midnight
+    """
+    t = tok.strip()
+    # Accept "YYYY-MM-DD HH:MM:SS" by replacing space with 'T' for fromisoformat
+    if " " in t and "T" not in t:
+        t_iso = t.replace(" ", "T")
+    else:
+        t_iso = t
+    try:
+        dt = datetime.fromisoformat(t_iso)
+        return dt
+    except Exception:
+        pass
+
+    # Last-resort: numpy datetime64 can parse many ISO-like forms, then convert
+    try:
+        import numpy as _np
+        v = _np.datetime64(t)
+        # Convert to python datetime via timestamp in ns
+        # This conversion is a bit fiddly; easiest is to go through string
+        return datetime.fromisoformat(str(v).replace("Z", ""))
+    except Exception:
+        raise ValueError(
+            f"Could not parse datetime token {tok!r}. Use ISO like 2025-01-31 or 2025-01-31T13:45:00."
+        )
+
+def parse_inline_datetime_vector(text: str) -> Tuple[np.ndarray, Optional[str]]:
+    """
+    Parse datetimes from text and convert to Matplotlib date numbers (float days).
+    Returns (array, err).
+    """
+    toks = _tokenise_datetime_text(text)
+    if not toks:
+        return np.asarray([], dtype=float), "No datetime values found."
+
+    dts: List[datetime] = []
+    for tok in toks:
+        try:
+            dts.append(_parse_one_datetime(tok))
+        except Exception as e:
+            return np.asarray([], dtype=float), str(e)
+
+    return np.asarray(mdates.date2num(dts), dtype=float), None
+
+def col_as_datetime(col: List[str], col_name: str) -> Tuple[np.ndarray, Optional[str]]:
+    """
+    Convert a column of strings to Matplotlib date numbers.
+    Empty cells are skipped.
+    Errors on first non-empty unparsable cell.
+    """
+    import matplotlib.dates as mdates
+
+    out: List[float] = []
+    for i, cell in enumerate(col):
+        s = "" if cell is None else str(cell).strip()
+        if s == "":
+            continue
+        try:
+            dt = _parse_one_datetime(s)
+            out.append(float(mdates.date2num(dt)))
+        except Exception as e:
+            # +2: header is row 1, data starts at row 2
+            return np.asarray([], dtype=float), f"Bad datetime in column '{col_name}' at row {i + 2}: {s!r}. {e}"
+
+    if not out:
+        return np.asarray([], dtype=float), f"No datetime values found in column '{col_name}'."
 
     return np.asarray(out, dtype=float), None

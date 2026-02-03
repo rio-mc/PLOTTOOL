@@ -14,6 +14,7 @@ class PlotFamily(str, Enum):
     DISTRIBUTION = "distribution"
     RELATIONSHIPS = "relationships"
     MULTIVARIATE = "multivariate"
+    TIMESERIES = "timeseries"
     GEOSPATIAL = "geospatial"
     NETWORK = "network"
     SURVIVAL = "survival"
@@ -34,11 +35,14 @@ class PlotType(str, Enum):
     BOX = "box"
     VIOLIN = "violin"
 
-    # 3D (you already use these in app/builder)
+    # 3D
     LINE3D = "line3d"
     SCATTER3D = "scatter3d"
 
-    # NEW DISTRIBUTION (y-only)
+    # TIME SERIES
+    TIMESERIES = "timeseries"
+
+    # DISTRIBUTION (y-only)
     KDE = "kde"
     ECDF = "ecdf"
     QQNORM = "qqnorm"
@@ -101,6 +105,9 @@ class SeriesSpec:
     use_x_std: bool = False
     use_y_std: bool = False
 
+    x_tick_label_angle: int = 0
+    y_tick_label_angle: int = 0
+
     # Group split controls (table mode)
     split_by_group: bool = False
     group_label_prefix: str = ""
@@ -123,6 +130,10 @@ class StyleSpec:
     x_label: str = ""
     y_label: str = ""
     z_label: Optional[str] = None
+
+    # NEW: axis tick label angles (degrees)
+    x_tick_label_angle: int = 0
+    y_tick_label_angle: int = 0
 
     show_grid: bool = True
     show_minor_ticks: bool = False
@@ -268,6 +279,7 @@ class PlotSpec:
             series=series,
             style=StyleSpec(
                 font_family=str(style_d.get("font_family", "")),
+
                 title=str(style_d.get("title", "")),
                 title_bold=bool(style_d.get("title_bold", False)),
                 title_italic=bool(style_d.get("title_italic", False)),
@@ -280,6 +292,9 @@ class PlotSpec:
                 x_label=str(style_d.get("x_label", "")),
                 y_label=str(style_d.get("y_label", "")),
                 z_label=(None if not str(style_d.get("z_label", "")).strip() else str(style_d.get("z_label")).strip()),
+
+                x_tick_label_angle=int(style_d.get("x_tick_label_angle", 0)),
+                y_tick_label_angle=int(style_d.get("y_tick_label_angle", 0)),
 
                 show_grid=bool(style_d.get("show_grid", True)),
                 show_minor_ticks=bool(style_d.get("show_minor_ticks", False)),
