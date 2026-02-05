@@ -11,10 +11,10 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib import font_manager
 
-from .spec import PlotSpec, PlotFamily, PlotType, StyleSpec, SeriesSpec, SeriesInlineData, SeriesStyleSpec
-from .builder import build_series_data, draw
-from .export_code import export_code_scaffold
-from .plot_types import (
+from plotting.spec import PlotSpec, PlotFamily, PlotType, StyleSpec, SeriesSpec, SeriesInlineData, SeriesStyleSpec
+from plotting.builder import build_series_data, draw
+from plotting.export_code import export_code_scaffold
+from plotting.plot_types import (
     meta_for,
     types_for_family,
     default_type_for_family,
