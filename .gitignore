@@ -3,6 +3,10 @@ plotting/__pycache__/
 *.py[codz]
 *$py.class
 
+# Environment variables
+.env
+.env.*
+
 # C extensions
 *.so
 

@@ -1,11 +1,9 @@
-from __future__ import annotations
-
 import base64
 import io
 from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
@@ -28,6 +26,7 @@ from plotting.builder import build_series_data, draw
 from plotting.plot_types import available_families, label_for_family, meta_for, types_for_family
 from plotting.codegen import generate_plot_code
 
+from fastapi.middleware.cors import CORSMiddleware
 
 # -----------------------
 # Request models
@@ -42,7 +41,7 @@ class RenderRequest(BaseModel):
 
     elev: Optional[float] = None
     azim: Optional[float] = None
-    roll: Optional[float] = None  # fix typo
+    roll: Optional[float] = None
 
 
 class CodegenRequest(BaseModel):
@@ -55,6 +54,13 @@ class CodegenRequest(BaseModel):
 
 app = FastAPI(title="Plotting Service")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],  # Vite dev server
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # -----------------------
 # Middleware: max body size
@@ -196,7 +202,7 @@ def health():
 
 @app.post("/render")
 @limiter.limit("20/minute")  # apply per-endpoint limit
-def render(req: RenderRequest):
+def render(request: Request, req: RenderRequest):  # ✅ add request: Request
     spec = _parse_spec(req.spec)
     try:
         payload, mime, issues = _render_to_bytes(spec, req)
@@ -212,7 +218,7 @@ def render(req: RenderRequest):
 
 @app.post("/render_json")
 @limiter.limit("20/minute")
-def render_json(req: RenderRequest):
+def render_json(request: Request, req: RenderRequest):  # ✅ add request: Request
     spec = _parse_spec(req.spec)
     try:
         payload, mime, issues = _render_to_bytes(spec, req)
