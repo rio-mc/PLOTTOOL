@@ -200,9 +200,11 @@ def health():
     return {"ok": True}
 
 
+limit = "120/minute"
+
 @app.post("/render")
-@limiter.limit("20/minute")  # apply per-endpoint limit
-def render(request: Request, req: RenderRequest):  # ✅ add request: Request
+@limiter.limit(limit)  # apply per-endpoint limit
+def render(request: Request, req: RenderRequest):
     spec = _parse_spec(req.spec)
     try:
         payload, mime, issues = _render_to_bytes(spec, req)
@@ -217,8 +219,8 @@ def render(request: Request, req: RenderRequest):  # ✅ add request: Request
 
 
 @app.post("/render_json")
-@limiter.limit("20/minute")
-def render_json(request: Request, req: RenderRequest):  # ✅ add request: Request
+@limiter.limit(limit)
+def render_json(request: Request, req: RenderRequest):
     spec = _parse_spec(req.spec)
     try:
         payload, mime, issues = _render_to_bytes(spec, req)
